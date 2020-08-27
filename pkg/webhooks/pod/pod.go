@@ -16,13 +16,19 @@ import (
 	admissionctl "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
+//OSD-4262 Prevent infra nodes from being targeted by logging stack
+//Namespace openshift-logging should not be able to launch pods on infra/master
+//Should we also block for launching on infra/master pods in openshift-monitoring namespace?
+
 const (
 	WebhookName         string = "pod-validation"
-	privilegedNamespace string = `(^kube.*|^openshift.*|^default|^redhat.*)`
+	privilegedNamespace string = `(^kube.*|^openshift.*|^default$|^redhat.*)`
+	exceptionNamespace string = `(openshift-logging)`
 )
 
 var (
 	privilegedNamespaceRe = regexp.MustCompile(privilegedNamespace)
+	exceptionNamespaceRe = regexp.MustCompile(exceptionNamespace)
 	log                   = logf.Log.WithName(WebhookName)
 
 	scope = admissionregv1.NamespacedScope
@@ -32,7 +38,7 @@ var (
 			Rule: admissionregv1.Rule{
 				APIGroups:   []string{"v1"},
 				APIVersions: []string{"*"},
-				Resources:   []string{"pods}"},
+				Resources:   []string{"pods"},
 				Scope:       &scope,
 			},
 		},
@@ -64,7 +70,7 @@ func (s *PodWebhook) FailurePolicy() admissionregv1.FailurePolicyType {
 func (s *PodWebhook) Rules() []admissionregv1.RuleWithOperations { return rules }
 
 // GetURI implements Webhook interface
-func (s *PodWebhook) GetURI() string { return "/namespace-validation" }
+func (s *PodWebhook) GetURI() string { return "/" + WebhookName }
 
 // SideEffects implements Webhook interface
 func (s *PodWebhook) SideEffects() admissionregv1.SideEffectClass {
@@ -109,7 +115,7 @@ func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Respo
 	// Pod is in a customer namespace, so check tolerations on the pod
 	// (pod.Spec.Tolerations) for disallowed ones. Check OSD-2927 for more
 	// details. return out of this if statement after all checks are done.
-	if !privilegedNamespaceRe.Match([]byte(pod.ObjectMeta.GetNamespace())) {
+	if !privilegedNamespaceRe.Match([]byte(pod.ObjectMeta.GetNamespace())) || exceptionNamespaceRe.Match([]byte(pod.ObjectMeta.GetNamespace())){
 		for _, toleration := range pod.Spec.Tolerations {
 			if toleration.Key == "node-role.kubernetes.io/infra" && toleration.Effect == corev1.TaintEffectNoSchedule {
 				ret = admissionctl.Denied("Not allowed to schedule a pod with NoSchedule taint on infra node")
@@ -131,9 +137,8 @@ func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Respo
 				ret.UID = request.AdmissionRequest.UID
 				return ret
 			}
-	} 
 
-	//This is not done, still adding more
+	} 
 	
 	// Hereafter, all requests are controlled by RBAC
 

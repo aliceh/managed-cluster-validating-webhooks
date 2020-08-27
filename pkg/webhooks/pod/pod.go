@@ -23,6 +23,7 @@ import (
 const (
 	WebhookName         string = "pod-validation"
 	privilegedNamespace string = `(^kube$|^kube-.*|^openshift$|^openshift-.*|^default$|^redhat-.*)`
+	                               
 	exceptionNamespace string = `(openshift-logging|openshift-operators)`
 )
 

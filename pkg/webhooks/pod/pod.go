@@ -16,14 +16,9 @@ import (
 	admissionctl "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-//OSD-4262 Prevent infra nodes from being targeted by logging stack
-//Namespace openshift-logging should not be able to launch pods on infra/master
-//Should we also block for launching on infra/master pods in openshift-monitoring namespace?
-
 const (
 	WebhookName         string = "pod-validation"
-	privilegedNamespace string = `(^kube$|^kube-.*|^openshift$|^openshift-.*|^default$|^redhat-.*)`
-	                               
+	privilegedNamespace string = `(^kube$|^kube-.*|^openshift$|^openshift-.*|^default$|^redhat-.*)`	                               
 	exceptionNamespace string = `(openshift-logging|openshift-operators)`
 )
 
@@ -104,7 +99,6 @@ func (s *PodWebhook) renderPod(req admissionctl.Request) (*corev1.Pod, error) {
 	return pod, nil
 }
 
-// Reference link: https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration
 func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Response {
 	var ret admissionctl.Response
 	pod, err := s.renderPod(request)
@@ -112,10 +106,7 @@ func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Respo
 		log.Error(err, "Couldn't render a Pod from the incoming request")
 		return admissionctl.Errored(http.StatusBadRequest, err)
 	}
-	// Check if the Pod is being created in a privileged OSD/RedHat/Kubernetes Namespace (not a customer one)
-	// Pod is in a customer namespace, so check tolerations on the pod
-	// (pod.Spec.Tolerations) for disallowed ones. Check OSD-2927 for more
-	// details. return out of this if statement after all checks are done.
+// Pod will not be allowed to deploy on infra/master if it is outside of privilegedNamespace or in an exceptionNamespace
 	if !privilegedNamespaceRe.Match([]byte(pod.ObjectMeta.GetNamespace())) || exceptionNamespaceRe.Match([]byte(pod.ObjectMeta.GetNamespace())){
 		for _, toleration := range pod.Spec.Tolerations {
 			if toleration.Key == "node-role.kubernetes.io/infra" && toleration.Effect == corev1.TaintEffectNoSchedule {

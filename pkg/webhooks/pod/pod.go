@@ -18,11 +18,13 @@ import (
 
 const (
 	WebhookName         string = "pod-validation"
-	privilegedNamespace string = `(^kube.*|^openshift.*|^default|^redhat.*)`
+	privilegedNamespace string = `(^kube$|^kube-.*|^openshift$|^openshift-.*|^default$|^redhat-.*)`
+	exceptionNamespace  string = `(openshift-logging|openshift-operators)`
 )
 
 var (
 	privilegedNamespaceRe = regexp.MustCompile(privilegedNamespace)
+	exceptionNamespaceRe  = regexp.MustCompile(exceptionNamespace)
 	log                   = logf.Log.WithName(WebhookName)
 
 	scope = admissionregv1.NamespacedScope
@@ -32,7 +34,7 @@ var (
 			Rule: admissionregv1.Rule{
 				APIGroups:   []string{"v1"},
 				APIVersions: []string{"*"},
-				Resources:   []string{"pods}"},
+				Resources:   []string{"pods"},
 				Scope:       &scope,
 			},
 		},
@@ -64,7 +66,7 @@ func (s *PodWebhook) FailurePolicy() admissionregv1.FailurePolicyType {
 func (s *PodWebhook) Rules() []admissionregv1.RuleWithOperations { return rules }
 
 // GetURI implements Webhook interface
-func (s *PodWebhook) GetURI() string { return "/namespace-validation" }
+func (s *PodWebhook) GetURI() string { return "/" + WebhookName }
 
 // SideEffects implements Webhook interface
 func (s *PodWebhook) SideEffects() admissionregv1.SideEffectClass {
@@ -97,7 +99,6 @@ func (s *PodWebhook) renderPod(req admissionctl.Request) (*corev1.Pod, error) {
 	return pod, nil
 }
 
-// Reference link: https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration
 func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Response {
 	var ret admissionctl.Response
 	pod, err := s.renderPod(request)
@@ -105,11 +106,8 @@ func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Respo
 		log.Error(err, "Couldn't render a Pod from the incoming request")
 		return admissionctl.Errored(http.StatusBadRequest, err)
 	}
-	// Check if the Pod is being created in a privileged OSD/RedHat/Kubernetes Namespace (not a customer one)
-	// Pod is in a customer namespace, so check tolerations on the pod
-	// (pod.Spec.Tolerations) for disallowed ones. Check OSD-2927 for more
-	// details. return out of this if statement after all checks are done.
-	if !privilegedNamespaceRe.Match([]byte(pod.ObjectMeta.GetNamespace())) {
+	// Pod will not be allowed to deploy on infra/master if it is outside of privilegedNamespace or in an exceptionNamespace
+	if !privilegedNamespaceRe.Match([]byte(pod.ObjectMeta.GetNamespace())) || exceptionNamespaceRe.Match([]byte(pod.ObjectMeta.GetNamespace())) {
 		for _, toleration := range pod.Spec.Tolerations {
 			if toleration.Key == "node-role.kubernetes.io/infra" && toleration.Effect == corev1.TaintEffectNoSchedule {
 				ret = admissionctl.Denied("Not allowed to schedule a pod with NoSchedule taint on infra node")
@@ -122,19 +120,18 @@ func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Respo
 				return ret
 			}
 			if toleration.Key == "node-role.kubernetes.io/master" && toleration.Effect == corev1.TaintEffectNoSchedule {
-				ret = admissionctl.Denied("Not allowed to schedule a pod with NoSchedule taint on mater node")
+				ret = admissionctl.Denied("Not allowed to schedule a pod with NoSchedule taint on master node")
 				ret.UID = request.AdmissionRequest.UID
 				return ret
 			}
 			if toleration.Key == "node-role.kubernetes.io/master" && toleration.Effect == corev1.TaintEffectPreferNoSchedule {
-				ret = admissionctl.Denied("Not allowed to schedule a pod with PreferNoSchedule taint on mater node")
+				ret = admissionctl.Denied("Not allowed to schedule a pod with PreferNoSchedule taint on master node")
 				ret.UID = request.AdmissionRequest.UID
 				return ret
 			}
-	} 
+		}
+	}
 
-	//This is not done, still adding more
-	
 	// Hereafter, all requests are controlled by RBAC
 
 	ret = admissionctl.Allowed("Allowed to create a Pod in a privileged Namespace because of RBAC")
@@ -144,6 +141,7 @@ func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Respo
 
 // HandleRequest Decide if the incoming request is allowed
 func (s *PodWebhook) HandleRequest(w http.ResponseWriter, r *http.Request) {
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	request, _, err := utils.ParseHTTPRequest(r)

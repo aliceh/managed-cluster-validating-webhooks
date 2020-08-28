@@ -75,15 +75,14 @@ func runPodTests(t *testing.T, tests []podTestSuites) {
 func TestThing(t *testing.T) {
 	tests := []podTestSuites{
 		{
-			testID:        "logging-stack",
-			targetPod:     "github:logging-stack",
-			namespace:     "openshift-logging",
+			testID:          "logging-stack",
+			targetPod:       "github:logging-stack",
+			namespace:       "openshift-logging",
 			username:        "kube:admin",
 			userGroups:      []string{"kube:system", "system:authenticated", "system:authenticated:oauth"},
 			operation:       v1beta1.Create,
-			shouldBeAllowed: true,
-		}
-
+			shouldBeAllowed: false,
+		},
 	}
-
+	runPodTests(t, tests)
 }

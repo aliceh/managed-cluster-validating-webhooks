@@ -25,6 +25,7 @@ const testPodRaw string = `{
 type podTestSuites struct {
 	testID          string
 	targetPod       string
+	namespace       string
 	username        string
 	userGroups      []string
 	oldObject       *runtime.RawExtension
@@ -69,4 +70,20 @@ func runPodTests(t *testing.T, tests []podTestSuites) {
 			t.Fatalf("Mismatch: %s (groups=%s) %s %s the %s pod. Test's expectation is that the user %s", test.username, test.userGroups, testutils.CanCanNot(response.Allowed), string(test.operation), test.targetNamespace, testutils.CanCanNot(test.shouldBeAllowed))
 		}
 	}
+}
+
+func TestThing(t *testing.T) {
+	tests := []podTestSuites{
+		{
+			testID:        "logging-stack",
+			targetPod:     "github:logging-stack",
+			namespace:     "openshift-logging",
+			username:        "kube:admin",
+			userGroups:      []string{"kube:system", "system:authenticated", "system:authenticated:oauth"},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: true,
+		}
+
+	}
+
 }

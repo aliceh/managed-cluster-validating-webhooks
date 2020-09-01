@@ -120,12 +120,12 @@ func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Respo
 				return ret
 			}
 			if toleration.Key == "node-role.kubernetes.io/master" && toleration.Effect == corev1.TaintEffectNoSchedule {
-				ret = admissionctl.Denied("Not allowed to schedule a pod with NoSchedule taint on mater node")
+				ret = admissionctl.Denied("Not allowed to schedule a pod with NoSchedule taint on master node")
 				ret.UID = request.AdmissionRequest.UID
 				return ret
 			}
 			if toleration.Key == "node-role.kubernetes.io/master" && toleration.Effect == corev1.TaintEffectPreferNoSchedule {
-				ret = admissionctl.Denied("Not allowed to schedule a pod with PreferNoSchedule taint on mater node")
+				ret = admissionctl.Denied("Not allowed to schedule a pod with PreferNoSchedule taint on master node")
 				ret.UID = request.AdmissionRequest.UID
 				return ret
 			}
@@ -141,6 +141,7 @@ func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Respo
 
 // HandleRequest Decide if the incoming request is allowed
 func (s *PodWebhook) HandleRequest(w http.ResponseWriter, r *http.Request) {
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	request, _, err := utils.ParseHTTPRequest(r)

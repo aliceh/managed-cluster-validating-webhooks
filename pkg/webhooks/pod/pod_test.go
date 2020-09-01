@@ -11,25 +11,36 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// Raw JSON for a Namespace, used as runtime.RawExtension, and represented here
+// Raw JSON for a Pod and Node, used as runtime.RawExtension, and represented here
 // because sometimes we need it for OldObject as well as Object.
 const testPodRaw string = `{
   "metadata": {
-    "name": "%s",
-    "uid": "%s",
+	"name": "%s",
+	"tolerationeffect": "%s"
+	"tolerationkey":     "%s%"
+	"operator": "%s"
+	"value": "%s"
+	"uid": "%s",
+	""
     "creationTimestamp": "2020-05-10T07:51:00Z"
   },
   "users": null
 }`
 
 type podTestSuites struct {
-	testID          string
-	targetPod       string
-	namespace       string
-	username        string
-	userGroups      []string
-	oldObject       *runtime.RawExtension
-	operation       v1beta1.Operation
+	testID            string
+	targetPod         string
+	tainteffect       string
+	taintkey          string
+	tolerationkey     string
+	tolerationeffect  string
+	operator          string
+	value             string             
+	namespace         string
+	username          string
+	userGroups        []string
+	oldObject         *runtime.RawExtension
+	operation         v1beta1.Operation
 	shouldBeAllowed bool
 }
 
@@ -72,16 +83,48 @@ func runPodTests(t *testing.T, tests []podTestSuites) {
 	}
 }
 
-func TestThing(t *testing.T) {
+func Test(t *testing.T) {
 	tests := []podTestSuites{
 		{
-			testID:          "logging-stack",
-			targetPod:       "github:logging-stack",
-			namespace:       "openshift-logging",
-			username:        "kube:admin",
-			userGroups:      []string{"kube:system", "system:authenticated", "system:authenticated:oauth"},
-			operation:       v1beta1.Create,
-			shouldBeAllowed: false,
+			testID:           "logging-stack",
+			targetPod:        "github:logging-stack",
+			namespace:        "openshift-logging",
+			username:         "kube:admin",
+			tainteffect:      "NoSchedule",
+			taintkey          "foo"
+			tolerationkey:    ""
+			tolerationeffect: "NoSchedule",
+			operator:         "Exists"  
+			userGroups:       []string{"kube:system", "system:authenticated", "system:authenticated:oauth"},
+			operation:        v1beta1.Create,
+			shouldBeAllowed:  false,
+		},
+		{
+			testID:           "logging-stack",
+			targetPod:        "github:logging-stack",
+			namespace:        "openshift-logging",
+			username:         "kube:admin",
+			taintkey          "bar"
+			tainteffect:      "NoSchedule",
+			tolerationkey:    ""
+			tolerationeffect: "NoSchedule",
+			operator:         "Equal"  
+			userGroups:       []string{"kube:system", "system:authenticated", "system:authenticated:oauth"},
+			operation:        v1beta1.Create,
+			shouldBeAllowed:  false,
+		},
+		{
+			testID:           "logging-stack",
+			targetPod:        "github:logging-stack",
+			namespace:        "openshift-logging",
+			username:         "kube:admin",
+			tainteffect:      "NoSchedule",
+			tolerationkey:    ""
+			tolerationeffect: "PreferNoSchedule",
+			operator:         "Exists"  
+			userGroups:       []string{"kube:system", "system:authenticated", "system:authenticated:oauth"},
+			operation:        v1beta1.Create,
+			shouldBeAllowed:  false,
 		},
 	}
 	runPodTests(t, tests)

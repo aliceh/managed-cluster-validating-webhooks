@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	v1beta1 "k8s.io/client-go/kubernetes/typed/admissionregistration/v1beta1"
 )
 
 func createRawPodJSON(tolerations []corev1.Toleration, testid, namespace string) (string, error) {
@@ -29,8 +30,10 @@ func createRawPodJSON(tolerations []corev1.Toleration, testid, namespace string)
 
 type podTestSuites struct {
 	testID          string
+	targetPod       string
 	namespace       string
 	username        string
+	operation       v1beta1.Operation
 	userGroups      []string
 	tolerations     []corev1.Toleration
 	shouldBeAllowed bool
@@ -59,8 +62,7 @@ func runPodTests(t *testing.T, tests []podTestSuites) {
 		}
 		hook := NewWebhook()
 		httprequest, err := testutils.CreateHTTPRequest(hook.GetURI(),
-			test.testID,
-			gvk, gvr, test.username, test.userGroups, &obj)
+			test.testID, gvk, gvr, test.operation, test.username, test.userGroups, test.operation, &obj)
 		if err != nil {
 			t.Fatalf("Expected no error, got %s", err.Error())
 		}
@@ -88,23 +90,22 @@ func Test(t *testing.T) {
 			userGroups: []string{"system:authenticated", "dedicated-admin"},
 			tolerations: []corev1.Toleration{
 				{
-					Key: "toleration key name",
+					Key:      "toleration key name",
 					Operator: corev1.TolerationOpEqual,
-					Value: "toleration key value",
-					Effect: corev1.TaintEffectNoExecute,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectNoExecute,
 				},
 				{
-					Key: "toleration key name2",
+					Key:      "toleration key name2",
 					Operator: corev1.TolerationOpEqual,
-					Value: "toleration key value2",
-					Effect: corev1.TaintEffectNoSchedule,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectNoSchedule,
 				},
 			},
-
+			operation:       v1beta1.Create,
 			shouldBeAllowed: false,
-			},
-		}
+		},
 	}
 	runPodTests(t, tests)
-	
+
 }

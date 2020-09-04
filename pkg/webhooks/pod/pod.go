@@ -18,13 +18,13 @@ import (
 
 const (
 	WebhookName         string = "pod-validation"
-	privilegedNamespace string = `(^kube$|^kube-.*|^openshift$|^openshift-.*|^default$|^redhat-.*)`	                               
-	exceptionNamespace string = `(openshift-logging|openshift-operators)`
+	privilegedNamespace string = `(^kube$|^kube-.*|^openshift$|^openshift-.*|^default$|^redhat-.*)`
+	exceptionNamespace  string = `(openshift-logging|openshift-operators)`
 )
 
 var (
 	privilegedNamespaceRe = regexp.MustCompile(privilegedNamespace)
-	exceptionNamespaceRe = regexp.MustCompile(exceptionNamespace)
+	exceptionNamespaceRe  = regexp.MustCompile(exceptionNamespace)
 	log                   = logf.Log.WithName(WebhookName)
 
 	scope = admissionregv1.NamespacedScope
@@ -106,8 +106,8 @@ func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Respo
 		log.Error(err, "Couldn't render a Pod from the incoming request")
 		return admissionctl.Errored(http.StatusBadRequest, err)
 	}
-// Pod will not be allowed to deploy on infra/master if it is outside of privilegedNamespace or in an exceptionNamespace
-	if !privilegedNamespaceRe.Match([]byte(pod.ObjectMeta.GetNamespace())) || exceptionNamespaceRe.Match([]byte(pod.ObjectMeta.GetNamespace())){
+	// Pod will not be allowed to deploy on infra/master if it is outside of privilegedNamespace or in an exceptionNamespace
+	if !privilegedNamespaceRe.Match([]byte(pod.ObjectMeta.GetNamespace())) || exceptionNamespaceRe.Match([]byte(pod.ObjectMeta.GetNamespace())) {
 		for _, toleration := range pod.Spec.Tolerations {
 			if toleration.Key == "node-role.kubernetes.io/infra" && toleration.Effect == corev1.TaintEffectNoSchedule {
 				ret = admissionctl.Denied("Not allowed to schedule a pod with NoSchedule taint on infra node")
@@ -129,9 +129,9 @@ func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Respo
 				ret.UID = request.AdmissionRequest.UID
 				return ret
 			}
+		}
+	}
 
-	} 
-	
 	// Hereafter, all requests are controlled by RBAC
 
 	ret = admissionctl.Allowed("Allowed to create a Pod in a privileged Namespace because of RBAC")

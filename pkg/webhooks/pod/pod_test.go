@@ -1,46 +1,38 @@
 package pod
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 
 	"github.com/openshift/managed-cluster-validating-webhooks/pkg/testutils"
-
-	"k8s.io/api/admission/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// Raw JSON for a Pod and Node, used as runtime.RawExtension, and represented here
-// because sometimes we need it for OldObject as well as Object.
-const testPodRaw string = `{
-  "metadata": {
-	"name": "%s",
-	"tolerationeffect": "%s"
-	"tolerationkey":     "%s%"
-	"operator": "%s"
-	"value": "%s"
-	"uid": "%s",
-	""
-    "creationTimestamp": "2020-05-10T07:51:00Z"
-  },
-  "users": null
-}`
+func createRawPodJSON(tolerations []corev1.Toleration, testid, namespace string) (string, error) {
+
+	str := `{
+				"metadata": {
+					"name": "%s",
+					"namespace": "%s",
+					"uid": "%s"
+					},
+					"%s"
+					"users": null
+			}`
+
+	partial, err := json.Marshal(tolerations)
+	return fmt.Sprintf(str, testid, namespace, string(partial)), err
+}
 
 type podTestSuites struct {
-	testID            string
-	targetPod         string
-	tainteffect       string
-	taintkey          string
-	tolerationkey     string
-	tolerationeffect  string
-	operator          string
-	value             string             
-	namespace         string
-	username          string
-	userGroups        []string
-	oldObject         *runtime.RawExtension
-	operation         v1beta1.Operation
+	testID          string
+	namespace       string
+	username        string
+	userGroups      []string
+	tolerations     []corev1.Toleration
 	shouldBeAllowed bool
 }
 
@@ -57,14 +49,18 @@ func runPodTests(t *testing.T, tests []podTestSuites) {
 	}
 
 	for _, test := range tests {
-		rawObjString := fmt.Sprintf(testPodRaw, test.targetPod, test.testID)
+		rawObjString, err := createRawPodJSON(test.tolerations, test.testID, test.namespace)
+		if err != nil {
+			t.Fatalf("Couldn't create a JSON fragment %s", err.Error)
+		}
+
 		obj := runtime.RawExtension{
 			Raw: []byte(rawObjString),
 		}
 		hook := NewWebhook()
 		httprequest, err := testutils.CreateHTTPRequest(hook.GetURI(),
 			test.testID,
-			gvk, gvr, test.operation, test.username, test.userGroups, &obj, test.oldObject)
+			gvk, gvr, test.username, test.userGroups, &obj)
 		if err != nil {
 			t.Fatalf("Expected no error, got %s", err.Error())
 		}
@@ -78,7 +74,7 @@ func runPodTests(t *testing.T, tests []podTestSuites) {
 		}
 
 		if response.Allowed != test.shouldBeAllowed {
-			t.Fatalf("Mismatch: %s (groups=%s) %s %s the %s pod. Test's expectation is that the user %s", test.username, test.userGroups, testutils.CanCanNot(response.Allowed), string(test.operation), test.targetNamespace, testutils.CanCanNot(test.shouldBeAllowed))
+			t.Fatalf("Mismatch: %s (groups=%s) %s %s the %s pod. Test's expectation is that the user %s", test.username, test.userGroups, testutils.CanCanNot(response.Allowed), testutils.CanCanNot(test.shouldBeAllowed))
 		}
 	}
 }
@@ -86,46 +82,29 @@ func runPodTests(t *testing.T, tests []podTestSuites) {
 func Test(t *testing.T) {
 	tests := []podTestSuites{
 		{
-			testID:           "logging-stack",
-			targetPod:        "github:logging-stack",
-			namespace:        "openshift-logging",
-			username:         "kube:admin",
-			tainteffect:      "NoSchedule",
-			taintkey          "foo"
-			tolerationkey:    ""
-			tolerationeffect: "NoSchedule",
-			operator:         "Exists"  
-			userGroups:       []string{"kube:system", "system:authenticated", "system:authenticated:oauth"},
-			operation:        v1beta1.Create,
-			shouldBeAllowed:  false,
-		},
-		{
-			testID:           "logging-stack",
-			targetPod:        "github:logging-stack",
-			namespace:        "openshift-logging",
-			username:         "kube:admin",
-			taintkey          "bar"
-			tainteffect:      "NoSchedule",
-			tolerationkey:    ""
-			tolerationeffect: "NoSchedule",
-			operator:         "Equal"  
-			userGroups:       []string{"kube:system", "system:authenticated", "system:authenticated:oauth"},
-			operation:        v1beta1.Create,
-			shouldBeAllowed:  false,
-		},
-		{
-			testID:           "logging-stack",
-			targetPod:        "github:logging-stack",
-			namespace:        "openshift-logging",
-			username:         "kube:admin",
-			tainteffect:      "NoSchedule",
-			tolerationkey:    ""
-			tolerationeffect: "PreferNoSchedule",
-			operator:         "Exists"  
-			userGroups:       []string{"kube:system", "system:authenticated", "system:authenticated:oauth"},
-			operation:        v1beta1.Create,
-			shouldBeAllowed:  false,
-		},
+			testID:     "dedicated-admin-cant-tolerate-in-protected",
+			namespace:  "kube-system",
+			username:   "dedicated-admin",
+			userGroups: []string{"system:authenticated", "dedicated-admin"},
+			tolerations: []corev1.Toleration{
+				{
+					Key: "toleration key name",
+					Operator: corev1.TolerationOpEqual,
+					Value: "toleration key value",
+					Effect: corev1.TaintEffectNoExecute,
+				},
+				{
+					Key: "toleration key name2",
+					Operator: corev1.TolerationOpEqual,
+					Value: "toleration key value2",
+					Effect: corev1.TaintEffectNoSchedule,
+				},
+			},
+
+			shouldBeAllowed: false,
+			},
+		}
 	}
 	runPodTests(t, tests)
+	
 }

@@ -12,19 +12,22 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-func createRawPodJSON(tolerations []corev1.Toleration, testid, namespace string) (string, error) {
+func createRawPodJSON(name string, tolerations []corev1.Toleration, testid, namespace string) (string, error) {
 
 	str := `{
 				"metadata": {
 					"name": "%s",
 					"namespace": "%s",
-					"uid": "%s"
+					"uid": "%s",
+				},	
+				"spec":{
+						"tolerations": "%s",
 					},
-					"%s"
 					"users": null
 			}`
 
 	partial, err := json.Marshal(tolerations)
+	//fmt.Printf("%s, %s, %s, %s", str, testid, namespace, string(partial))
 	return fmt.Sprintf(str, testid, namespace, string(partial)), err
 }
 
@@ -52,9 +55,9 @@ func runPodTests(t *testing.T, tests []podTestSuites) {
 	}
 
 	for _, test := range tests {
-		rawObjString, err := createRawPodJSON(test.tolerations, test.testID, test.namespace)
+		rawObjString, err := createRawPodJSON(test.targetPod, test.tolerations, test.testID, test.namespace)
 		if err != nil {
-			t.Fatalf("Couldn't create a JSON fragment %s", err.Error)
+			t.Fatalf("Couldn't create a JSON fragment %s", err.Error())
 		}
 
 		obj := runtime.RawExtension{
@@ -76,7 +79,7 @@ func runPodTests(t *testing.T, tests []podTestSuites) {
 		}
 
 		if response.Allowed != test.shouldBeAllowed {
-			t.Fatalf("Mismatch: %s (groups=%s) %s %s the %s pod. Test's expectation is that the user %s", test.username, test.userGroups, testutils.CanCanNot(response.Allowed), testutils.CanCanNot(test.shouldBeAllowed))
+			t.Fatalf("Mismatch: %s (groups=%s) %s %s the pod. Test's expectation is that the user %s", test.username, test.userGroups, testutils.CanCanNot(response.Allowed), test.operation, testutils.CanCanNot(test.shouldBeAllowed))
 		}
 	}
 }

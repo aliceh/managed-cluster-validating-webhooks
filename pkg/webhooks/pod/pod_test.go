@@ -62,7 +62,7 @@ func runPodTests(t *testing.T, tests []podTestSuites) {
 		}
 		hook := NewWebhook()
 		httprequest, err := testutils.CreateHTTPRequest(hook.GetURI(),
-			test.testID, gvk, gvr, test.operation, test.username, test.userGroups, test.operation, &obj)
+			test.testID, gvk, gvr, test.operation, test.username, test.userGroups, &obj, nil)
 		if err != nil {
 			t.Fatalf("Expected no error, got %s", err.Error())
 		}

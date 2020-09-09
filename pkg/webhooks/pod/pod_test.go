@@ -12,23 +12,26 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-func createRawPodJSON(name string, tolerations []corev1.Toleration, testid, namespace string) (string, error) {
+func createRawPodJSON(name string, tolerations []corev1.Toleration, uid string, namespace string) (string, error) {
 
 	str := `{
-				"metadata": {
-					"name": "%s",
-					"namespace": "%s",
-					"uid": "%s",
-				},	
-				"spec":{
-						"tolerations": "%s",
-					},
-					"users": null
-			}`
+		"metadata": {
+			"name": "%s",
+			"namespace": "%s",
+			"uid": "%s"
+		},
+		"spec": {
+			"tolerations": %s
+		},
+		"users": null
+	}`
 
 	partial, err := json.Marshal(tolerations)
-	//fmt.Printf("%s, %s, %s, %s", str, testid, namespace, string(partial))
-	return fmt.Sprintf(str, testid, namespace, string(partial)), err
+	//fmt.Printf("%s\n", partial)
+	//fmt.Printf("%s\n", uid)
+	//s := fmt.Sprintf(str, name, namespace, uid, string(partial))
+	//io.WriteString(os.Stdout, s)
+	return fmt.Sprintf(str, name, namespace, uid, string(partial)), err
 }
 
 type podTestSuites struct {
@@ -63,6 +66,8 @@ func runPodTests(t *testing.T, tests []podTestSuites) {
 		obj := runtime.RawExtension{
 			Raw: []byte(rawObjString),
 		}
+		//fmt.Printf("%s", obj)
+
 		hook := NewWebhook()
 		httprequest, err := testutils.CreateHTTPRequest(hook.GetURI(),
 			test.testID, gvk, gvr, test.operation, test.username, test.userGroups, &obj, nil)
@@ -84,22 +89,288 @@ func runPodTests(t *testing.T, tests []podTestSuites) {
 	}
 }
 
-func Test(t *testing.T) {
+func TestDedicatedAdminNegative(t *testing.T) {
 	tests := []podTestSuites{
-		{
-			testID:     "dedicated-admin-cant-tolerate-in-protected",
-			namespace:  "kube-system",
+		{ //Dedicated admin can not deploy pod on master on infra nodes in openshift-operators, openshift-logging namespace or any other namespace that is not a core namespace like openshift-*, redhat-*, default, kube-*.
+			targetPod:  "my-test-pod",
+			testID:     "dedicated-admin-cant-deploy1",
+			namespace:  "my-little-project",
 			username:   "dedicated-admin",
 			userGroups: []string{"system:authenticated", "dedicated-admin"},
 			tolerations: []corev1.Toleration{
 				{
-					Key:      "toleration key name",
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: false,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "dedicated-admin-cant-deploy2",
+			namespace:  "openshift-operators",
+			username:   "dedicated-admin",
+			userGroups: []string{"system:authenticated", "dedicated-admin"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: false,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "dedicated-admin-cant-deploy3",
+			namespace:  "openshift-logging",
+			username:   "dedicated-admin",
+			userGroups: []string{"system:authenticated", "dedicated-admin"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: false,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "dedicated-admin-cant-deploy4",
+			namespace:  "openshift-logging",
+			username:   "dedicated-admin",
+			userGroups: []string{"system:authenticated", "dedicated-admin"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
 					Operator: corev1.TolerationOpEqual,
 					Value:    "toleration key value",
 					Effect:   corev1.TaintEffectNoExecute,
 				},
 				{
-					Key:      "toleration key name2",
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: false,
+		},
+	}
+	runPodTests(t, tests)
+}
+
+func TestDedicatedAdminPositive(t *testing.T) {
+	tests := []podTestSuites{
+		{ //Dedicated admin can deploy pod on master on infra if it is in a core namespace like openshift-*, redhat-*, default, kube-* with exceptions of openshift-operators and openshift-logging namespace.
+			targetPod:  "my-test-pod",
+			testID:     "dedicated-admin-can-deploy1",
+			namespace:  "openshift-apiserver",
+			username:   "dedicated-admin",
+			userGroups: []string{"system:authenticated", "dedicated-admin"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: true,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "dedicated-admin-can-deploy2",
+			namespace:  "kube-system",
+			username:   "dedicated-admin",
+			userGroups: []string{"system:authenticated", "dedicated-admin"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: true,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "dedicated-admin-can-deploy3",
+			namespace:  "redhat-config",
+			username:   "dedicated-admin",
+			userGroups: []string{"system:authenticated", "dedicated-admin"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: true,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "dedicated-admin-can-deploy4",
+			namespace:  "default",
+			username:   "dedicated-admin",
+			userGroups: []string{"system:authenticated", "dedicated-admin"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: true,
+		},
+	}
+	runPodTests(t, tests)
+}
+
+func TestUserNegative(t *testing.T) {
+	tests := []podTestSuites{
+		{ //User can not deploy pod on master on infra nodes in openshift-operators, openshift-logging namespace or any other namespace that is not a core namespace like openshift-*, redhat-*, default, kube-*.
+			targetPod:  "my-test-pod",
+			testID:     "user-alice-cant-deploy1",
+			namespace:  "openshift-logging",
+			username:   "alice",
+			userGroups: []string{"system:authenticated", "system:authenticated:oauth"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: false,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "user-alice-cant-deploy2",
+			namespace:  "openshift-operators",
+			username:   "alice",
+			userGroups: []string{"system:authenticated", "system:authenticated:oauth"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: false,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "user-alice-cant-deploy3",
+			namespace:  "my-little-project",
+			username:   "alice",
+			userGroups: []string{"system:authenticated", "system:authenticated:oauth"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: false,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "user-alice-cant-deploy4",
+			namespace:  "default-configs",
+			username:   "Alice",
+			userGroups: []string{"system:authenticated", "system:authenticated:oauth"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
 					Operator: corev1.TolerationOpEqual,
 					Value:    "toleration key value2",
 					Effect:   corev1.TaintEffectNoSchedule,
@@ -111,4 +382,101 @@ func Test(t *testing.T) {
 	}
 	runPodTests(t, tests)
 
+}
+func TestUserPositive(t *testing.T) {
+	tests := []podTestSuites{
+		{ //User can deploy pod on master on infra if it is in a core namespace like openshift-*, redhat-*, default, kube-* with exceptions of openshift-operators and openshift-logging namespace.
+			targetPod:  "my-test-pod",
+			testID:     "user-bob-can-deploy1",
+			namespace:  "openshift-apiserver",
+			username:   "bob",
+			userGroups: []string{"system:authenticated", "system:authenticated:oauth"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: true,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "user-bob-can-deploy2",
+			namespace:  "kube-system",
+			username:   "bob",
+			userGroups: []string{"system:authenticated", "system:authenticated:oauth"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: true,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "user-bob-can-deploy3",
+			namespace:  "redhat-config",
+			username:   "bob",
+			userGroups: []string{"system:authenticated", "system:authenticated:oauth"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: true,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "user-bob-can-deploy4",
+			namespace:  "default",
+			username:   "bob",
+			userGroups: []string{"system:authenticated", "system:authenticated:oauth"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: true,
+		},
+	}
+	runPodTests(t, tests)
 }

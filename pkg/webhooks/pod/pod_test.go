@@ -13,7 +13,6 @@ import (
 )
 
 func createRawPodJSON(name string, tolerations []corev1.Toleration, uid string, namespace string) (string, error) {
-
 	str := `{
 		"metadata": {
 			"name": "%s",
@@ -27,10 +26,6 @@ func createRawPodJSON(name string, tolerations []corev1.Toleration, uid string, 
 	}`
 
 	partial, err := json.Marshal(tolerations)
-	//fmt.Printf("%s\n", partial)
-	//fmt.Printf("%s\n", uid)
-	//s := fmt.Sprintf(str, name, namespace, uid, string(partial))
-	//io.WriteString(os.Stdout, s)
 	return fmt.Sprintf(str, name, namespace, uid, string(partial)), err
 }
 
@@ -66,7 +61,6 @@ func runPodTests(t *testing.T, tests []podTestSuites) {
 		obj := runtime.RawExtension{
 			Raw: []byte(rawObjString),
 		}
-		//fmt.Printf("%s", obj)
 
 		hook := NewWebhook()
 		httprequest, err := testutils.CreateHTTPRequest(hook.GetURI(),
@@ -94,7 +88,7 @@ func TestDedicatedAdminNegative(t *testing.T) {
 		{ //Dedicated admin can not deploy pod on master on infra nodes in openshift-operators, openshift-logging namespace or any other namespace that is not a core namespace like openshift-*, redhat-*, default, kube-*.
 			targetPod:  "my-test-pod",
 			testID:     "dedicated-admin-cant-deploy1",
-			namespace:  "my-little-project",
+			namespace:  "random-project",
 			username:   "dedicated-admin",
 			userGroups: []string{"system:authenticated", "dedicated-admin"},
 			tolerations: []corev1.Toleration{
@@ -154,7 +148,7 @@ func TestDedicatedAdminNegative(t *testing.T) {
 					Key:      "node-role.kubernetes.io/infra",
 					Operator: corev1.TolerationOpEqual,
 					Value:    "toleration key value2",
-					Effect:   corev1.TaintEffectPreferNoSchedule,
+					Effect:   corev1.TaintEffectNoSchedule,
 				},
 			},
 			operation:       v1beta1.Create,
@@ -178,6 +172,23 @@ func TestDedicatedAdminNegative(t *testing.T) {
 					Operator: corev1.TolerationOpEqual,
 					Value:    "toleration key value2",
 					Effect:   corev1.TaintEffectPreferNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: false,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "dedicated-admin-cant-deploy5",
+			namespace:  "openshift-logging",
+			username:   "dedicated-admin",
+			userGroups: []string{"system:authenticated", "dedicated-admin"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectNoSchedule,
 				},
 			},
 			operation:       v1beta1.Create,
@@ -278,6 +289,23 @@ func TestDedicatedAdminPositive(t *testing.T) {
 					Effect:   corev1.TaintEffectPreferNoSchedule,
 				},
 			},
+			operation:       v1beta1.Delete,
+			shouldBeAllowed: true,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "dedicated-admin-can-deploy5",
+			namespace:  "default",
+			username:   "dedicated-admin",
+			userGroups: []string{"system:authenticated", "dedicated-admin"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
 			operation:       v1beta1.Create,
 			shouldBeAllowed: true,
 		},
@@ -341,19 +369,13 @@ func TestUserNegative(t *testing.T) {
 			userGroups: []string{"system:authenticated", "system:authenticated:oauth"},
 			tolerations: []corev1.Toleration{
 				{
-					Key:      "node-role.kubernetes.io/master",
-					Operator: corev1.TolerationOpEqual,
-					Value:    "toleration key value",
-					Effect:   corev1.TaintEffectPreferNoSchedule,
-				},
-				{
 					Key:      "node-role.kubernetes.io/infra",
 					Operator: corev1.TolerationOpEqual,
 					Value:    "toleration key value2",
 					Effect:   corev1.TaintEffectNoSchedule,
 				},
 			},
-			operation:       v1beta1.Create,
+			operation:       v1beta1.Delete,
 			shouldBeAllowed: false,
 		},
 		{
@@ -383,6 +405,8 @@ func TestUserNegative(t *testing.T) {
 	runPodTests(t, tests)
 
 }
+
+// Normal user won't be able to create pods in privileged namespaces as RBAC will disallow it.
 func TestUserPositive(t *testing.T) {
 	tests := []podTestSuites{
 		{ //User can deploy pod on master on infra if it is in a core namespace like openshift-*, redhat-*, default, kube-* with exceptions of openshift-operators and openshift-logging namespace.
@@ -438,11 +462,29 @@ func TestUserPositive(t *testing.T) {
 			username:   "bob",
 			userGroups: []string{"system:authenticated", "system:authenticated:oauth"},
 			tolerations: []corev1.Toleration{
+
+				{
+					Key:      "node-role.kubernetes.io/infra",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: true,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "user-bob-can-deploy4",
+			namespace:  "default",
+			username:   "bob",
+			userGroups: []string{"system:authenticated", "system:authenticated:oauth"},
+			tolerations: []corev1.Toleration{
 				{
 					Key:      "node-role.kubernetes.io/master",
 					Operator: corev1.TolerationOpEqual,
 					Value:    "toleration key value",
-					Effect:   corev1.TaintEffectPreferNoSchedule,
+					Effect:   corev1.TaintEffectNoSchedule,
 				},
 				{
 					Key:      "node-role.kubernetes.io/infra",
@@ -474,7 +516,24 @@ func TestUserPositive(t *testing.T) {
 					Effect:   corev1.TaintEffectPreferNoSchedule,
 				},
 			},
-			operation:       v1beta1.Create,
+			operation:       v1beta1.Delete,
+			shouldBeAllowed: true,
+		},
+		{
+			targetPod:  "my-test-pod",
+			testID:     "user-bob-can-deploy4",
+			namespace:  "default",
+			username:   "bob",
+			userGroups: []string{"system:authenticated", "system:authenticated:oauth"},
+			tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpEqual,
+					Value:    "toleration key value2",
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
+			operation:       v1beta1.Delete,
 			shouldBeAllowed: true,
 		},
 	}

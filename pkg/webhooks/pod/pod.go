@@ -17,15 +17,15 @@ import (
 )
 
 const (
-	WebhookName         string = "pod-validation"
-	privilegedNamespace string = `(^kube$|^kube-.*|^openshift$|^openshift-.*|^default$|^redhat-.*)`
-	exceptionNamespace  string = `(openshift-logging|openshift-operators)`
+	WebhookName           string = "pod-validation"
+	privilegedNamespace   string = `(^kube$|^kube-.*|^openshift$|^openshift-.*|^default$|^redhat-.*)`
+	unprivilegedNamespace string = `(openshift-logging|openshift-operators)`
 )
 
 var (
-	privilegedNamespaceRe = regexp.MustCompile(privilegedNamespace)
-	exceptionNamespaceRe  = regexp.MustCompile(exceptionNamespace)
-	log                   = logf.Log.WithName(WebhookName)
+	privilegedNamespaceRe   = regexp.MustCompile(privilegedNamespace)
+	unprivilegedNamespaceRe = regexp.MustCompile(unprivilegedNamespace)
+	log                     = logf.Log.WithName(WebhookName)
 
 	scope = admissionregv1.NamespacedScope
 	rules = []admissionregv1.RuleWithOperations{
@@ -57,7 +57,9 @@ func (s *PodWebhook) MatchPolicy() admissionregv1.MatchPolicyType {
 // Name implements Webhook interface
 func (s *PodWebhook) Name() string { return WebhookName }
 
-// FailurePolicy implements Webhook interface
+// FailurePolicy implements Webhook interface and defines how unrecognized errors and timeout errors from the admission webhook are handled. Allowed values are Ignore or Fail.
+// Ignore means that an error calling the webhook is ignored and the API request is allowed to continue.
+// It's important to leave the FailurePolicy set to Ignore because otherwise the pod will fail to be created as the API request will be rejected.
 func (s *PodWebhook) FailurePolicy() admissionregv1.FailurePolicyType {
 	return admissionregv1.Ignore
 }
@@ -99,6 +101,18 @@ func (s *PodWebhook) renderPod(req admissionctl.Request) (*corev1.Pod, error) {
 	return pod, nil
 }
 
+func isRequestPrivileged(namespace string) bool {
+
+	if privilegedNamespaceRe.Match([]byte(namespace)) {
+		if unprivilegedNamespaceRe.Match([]byte(namespace)) {
+			return false
+		}
+		return true
+	}
+	return false
+
+}
+
 func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Response {
 	var ret admissionctl.Response
 	pod, err := s.renderPod(request)
@@ -106,8 +120,10 @@ func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Respo
 		log.Error(err, "Couldn't render a Pod from the incoming request")
 		return admissionctl.Errored(http.StatusBadRequest, err)
 	}
-	// Pod will not be allowed to deploy on infra/master if it is outside of privilegedNamespace or in an exceptionNamespace
-	if !privilegedNamespaceRe.Match([]byte(pod.ObjectMeta.GetNamespace())) || exceptionNamespaceRe.Match([]byte(pod.ObjectMeta.GetNamespace())) {
+
+	// If the incoming Pod is aimed at a privileged namespace except for unprivilegedNamespace, allow it to do whatever it wants.
+	// However, if the pod is targeting a customer's namespace (aka non-privileged), then it may not tolerate certain master/infra node taints.
+	if !isRequestPrivileged(pod.ObjectMeta.GetNamespace()) {
 		for _, toleration := range pod.Spec.Tolerations {
 			if toleration.Key == "node-role.kubernetes.io/infra" && toleration.Effect == corev1.TaintEffectNoSchedule {
 				ret = admissionctl.Denied("Not allowed to schedule a pod with NoSchedule taint on infra node")
@@ -133,15 +149,13 @@ func (s *PodWebhook) authorized(request admissionctl.Request) admissionctl.Respo
 	}
 
 	// Hereafter, all requests are controlled by RBAC
-
-	ret = admissionctl.Allowed("Allowed to create a Pod in a privileged Namespace because of RBAC")
+	ret = admissionctl.Allowed("Allowed to create Pod because of RBAC")
 	ret.UID = request.AdmissionRequest.UID
 	return ret
 }
 
 // HandleRequest Decide if the incoming request is allowed
 func (s *PodWebhook) HandleRequest(w http.ResponseWriter, r *http.Request) {
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	request, _, err := utils.ParseHTTPRequest(r)
@@ -158,7 +172,6 @@ func (s *PodWebhook) HandleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// should the request be authorized?
-
 	responsehelper.SendResponse(w, s.authorized(request))
 }
 

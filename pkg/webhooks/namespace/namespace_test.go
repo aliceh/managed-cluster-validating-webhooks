@@ -1,6 +1,7 @@
 package namespace
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -17,10 +18,27 @@ const testNamespaceRaw string = `{
   "metadata": {
     "name": "%s",
     "uid": "%s",
-    "creationTimestamp": "2020-05-10T07:51:00Z"
+		"creationTimestamp": "2020-05-10T07:51:00Z",
+		"labels": %s
   },
   "users": null
 }`
+
+// labelsMapToString is a helper to turn a map into a JSON fragment to be
+// inserted into the testNamespaceRaw const. See createRawJSONString.
+func labelsMapToString(labels map[string]string) string {
+	ret, _ := json.Marshal(labels)
+	return string(ret)
+}
+
+func createRawJSONString(name, uid string, labels map[string]string) string {
+	return fmt.Sprintf(testNamespaceRaw, name, uid, labelsMapToString(labels))
+}
+func createOldObject(name, uid string, labels map[string]string) *runtime.RawExtension {
+	return &runtime.RawExtension{
+		Raw: []byte(createRawJSONString(name, uid, labels)),
+	}
+}
 
 type namespaceTestSuites struct {
 	testID          string
@@ -29,6 +47,7 @@ type namespaceTestSuites struct {
 	userGroups      []string
 	oldObject       *runtime.RawExtension
 	operation       v1beta1.Operation
+	labels          map[string]string
 	shouldBeAllowed bool
 }
 
@@ -45,14 +64,11 @@ func runNamespaceTests(t *testing.T, tests []namespaceTestSuites) {
 	}
 
 	for _, test := range tests {
-		rawObjString := fmt.Sprintf(testNamespaceRaw, test.targetNamespace, test.testID)
-		obj := runtime.RawExtension{
-			Raw: []byte(rawObjString),
-		}
+		obj := createOldObject(test.targetNamespace, test.testID, test.labels)
 		hook := NewWebhook()
 		httprequest, err := testutils.CreateHTTPRequest(hook.GetURI(),
 			test.testID,
-			gvk, gvr, test.operation, test.username, test.userGroups, &obj, test.oldObject)
+			gvk, gvr, test.operation, test.username, test.userGroups, obj, test.oldObject)
 		if err != nil {
 			t.Fatalf("Expected no error, got %s", err.Error())
 		}
@@ -66,7 +82,7 @@ func runNamespaceTests(t *testing.T, tests []namespaceTestSuites) {
 		}
 
 		if response.Allowed != test.shouldBeAllowed {
-			t.Fatalf("Mismatch: %s (groups=%s) %s %s the %s namespace. Test's expectation is that the user %s", test.username, test.userGroups, testutils.CanCanNot(response.Allowed), string(test.operation), test.targetNamespace, testutils.CanCanNot(test.shouldBeAllowed))
+			t.Fatalf("Mismatch: %s (groups=%s) %s %s the %s namespace. Test's expectation is that the user %s. Reason: %+v", test.username, test.userGroups, testutils.CanCanNot(response.Allowed), string(test.operation), test.targetNamespace, testutils.CanCanNot(test.shouldBeAllowed), response)
 		}
 	}
 }
@@ -325,6 +341,15 @@ func TestServiceAccounts(t *testing.T) {
 			operation:       v1beta1.Delete,
 			shouldBeAllowed: true,
 		},
+		{
+			// osde2e-related things can create a ns for must-gather
+			testID:          "sa-create-ns-for-must-gather",
+			targetNamespace: "openshift-must-gather-qbjtf",
+			username:        "system:serviceaccount:osde2e-9a47q:cluster-admin", // This does *NOT* mean cluster-admin as in that ClusterRole
+			userGroups:      []string{"system:serviceaccounts:osde2e-9a47q", "system:authenticated", "system:authenticated:oauth"},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: true,
+		},
 	}
 	runNamespaceTests(t, tests)
 }
@@ -340,8 +365,8 @@ func TestAdminUser(t *testing.T) {
 			userGroups:      []string{"kube:system", "system:authenticated", "system:authenticated:oauth"},
 			operation:       v1beta1.Update,
 			shouldBeAllowed: true,
-		}, {
-
+		},
+		{
 			// admin users gonna admin
 			testID:          "sre-test",
 			targetNamespace: "kube-system",
@@ -351,10 +376,37 @@ func TestAdminUser(t *testing.T) {
 			shouldBeAllowed: true,
 		},
 		{
+			// admin users gonna admin
+			testID:          "cluster-admin-test",
+			targetNamespace: "kube-system",
+			username:        "lisa",
+			userGroups:      []string{"cluster-admins", "system:authenticated", "system:authenticated:oauth"},
+			operation:       v1beta1.Update,
+			shouldBeAllowed: true,
+		},
+		{
+			// admin users gonna admin
+			testID:          "backplane-cluster-admin-test",
+			targetNamespace: "kube-system",
+			username:        "backplane-cluster-admin",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth"},
+			operation:       v1beta1.Update,
+			shouldBeAllowed: true,
+		},
+		{
 			// Admins should be able to create a privileged namespace
 			testID:          "admin-com-ns-test",
 			targetNamespace: "com",
-			username:        "kube:admin",
+			username:        "backplane-cluster-admin",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth"},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: true,
+		},
+		{
+			// Admins should be able to create a privileged namespace
+			testID:          "admin-com-ns-test",
+			targetNamespace: "com",
+			username:        "lisa",
 			userGroups:      []string{"osd-sre-admins", "system:authenticated", "system:authenticated:oauth"},
 			operation:       v1beta1.Create,
 			shouldBeAllowed: true,
@@ -364,7 +416,7 @@ func TestAdminUser(t *testing.T) {
 			testID:          "admin-com-io-test",
 			targetNamespace: "io",
 			username:        "kube:admin",
-			userGroups:      []string{"osd-sre-admins", "system:authenticated", "system:authenticated:oauth"},
+			userGroups:      []string{"kube:system", "system:authenticated", "system:authenticated:oauth"},
 			operation:       v1beta1.Create,
 			shouldBeAllowed: true,
 		},
@@ -372,13 +424,294 @@ func TestAdminUser(t *testing.T) {
 			// Admins should be able to create a privileged namespace
 			testID:          "admin-in-ns-test",
 			targetNamespace: "in",
-			username:        "kube:admin",
-			userGroups:      []string{"osd-sre-admins", "system:authenticated", "system:authenticated:oauth"},
+			username:        "lisa",
+			userGroups:      []string{"osd-sre-cluster-admins", "system:authenticated", "system:authenticated:oauth"},
+			operation:       v1beta1.Create,
+			shouldBeAllowed: true,
+		},
+		{
+			// Admins should be able to create a privileged namespace
+			testID:          "cluster-admin-in-ns-test",
+			targetNamespace: "in",
+			username:        "lisa",
+			userGroups:      []string{"cluster-admins", "system:authenticated", "system:authenticated:oauth"},
 			operation:       v1beta1.Create,
 			shouldBeAllowed: true,
 		},
 	}
 	runNamespaceTests(t, tests)
+}
+
+func TestLabelCreates(t *testing.T) {
+	tests := []namespaceTestSuites{
+		{
+			testID:          "sre-can-create-priv-labelled-ns",
+			targetNamespace: "openshift-priv-ns",
+			username:        "no-reply@redhat.com",
+			userGroups:      []string{"osd-sre-admins", "system:authenticated", "system:authenticated:oauth"},
+			operation:       v1beta1.Create,
+			labels:          map[string]string{"my-label": "hello"},
+			shouldBeAllowed: true,
+		},
+		{
+			testID:          "sre-can-create-priv-labelled-ns",
+			targetNamespace: "openshift-priv-ns",
+			username:        "no-reply@redhat.com",
+			userGroups:      []string{"osd-sre-admins", "system:authenticated", "system:authenticated:oauth"},
+			operation:       v1beta1.Create,
+			labels: map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "true",
+				"managed.openshift.io/storage-lb-quota-exempt": "true",
+			},
+			shouldBeAllowed: true,
+		},
+		{
+			testID:          "sre-cluster-admins-can-create-priv-labelled-ns",
+			targetNamespace: "openshift-priv-ns",
+			username:        "no-reply@redhat.com",
+			userGroups:      []string{"osd-sre-cluster-admins", "system:authenticated", "system:authenticated:oauth"},
+			operation:       v1beta1.Create,
+			labels:          map[string]string{"my-label": "hello"},
+			shouldBeAllowed: true,
+		},
+		{
+			testID:          "sre-cluster-admins-can-create-priv-labelled-ns",
+			targetNamespace: "openshift-priv-ns",
+			username:        "no-reply@redhat.com",
+			userGroups:      []string{"osd-sre-cluster-admins", "system:authenticated", "system:authenticated:oauth"},
+			operation:       v1beta1.Create,
+			labels: map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "true",
+				"managed.openshift.io/storage-lb-quota-exempt": "true",
+			},
+			shouldBeAllowed: true,
+		},
+		{
+			testID:          "cluster-admin-can-create-priv-labelled-ns",
+			targetNamespace: "openshift-priv-ns",
+			username:        "no-reply@redhat.com",
+			userGroups:      []string{"cluster-admins", "system:authenticated", "system:authenticated:oauth"},
+			operation:       v1beta1.Create,
+			labels:          map[string]string{"my-label": "hello"},
+			shouldBeAllowed: true,
+		},
+		{
+			testID:          "cluster-admins-can-create-priv-labelled-ns",
+			targetNamespace: "openshift-priv-ns",
+			username:        "no-reply@redhat.com",
+			userGroups:      []string{"cluster-admins", "system:authenticated", "system:authenticated:oauth"},
+			operation:       v1beta1.Create,
+			labels: map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "true",
+				"managed.openshift.io/storage-lb-quota-exempt": "true",
+			},
+			shouldBeAllowed: true,
+		},
+		{
+			testID:          "admin-test",
+			targetNamespace: "kube-system",
+			username:        "kube:admin",
+			userGroups:      []string{"kube:system", "system:authenticated", "system:authenticated:oauth"},
+			operation:       v1beta1.Create,
+			labels:          map[string]string{"my-label": "hello"},
+			shouldBeAllowed: true,
+		},
+		{
+			testID:          "admin-test",
+			targetNamespace: "kube-system",
+			username:        "kube:admin",
+			userGroups:      []string{"kube:system", "system:authenticated", "system:authenticated:oauth"},
+			operation:       v1beta1.Create,
+			labels: map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "true",
+				"managed.openshift.io/storage-lb-quota-exempt": "true",
+			},
+			shouldBeAllowed: true,
+		},
+		{
+			testID:          "dedicated-admin-can-create-normal-ns",
+			targetNamespace: "my-customer-ns",
+			username:        "test@user",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth", "dedicated-admins"},
+			operation:       v1beta1.Create,
+			labels:          map[string]string{"my-label": "hello"},
+			shouldBeAllowed: true,
+		},
+		{
+			testID:          "dedicated-admin-cant-create-normal-ns-with-priv-label",
+			targetNamespace: "my-customer-ns",
+			username:        "test@user",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth", "dedicated-admins"},
+			operation:       v1beta1.Create,
+			labels: map[string]string{
+				"my-label": "hello",
+				"managed.openshift.io/storage-pv-quota-exempt": "true",
+			},
+			shouldBeAllowed: false,
+		},
+		{
+			testID:          "dedicated-admin-cant-create-normal-ns-with-priv-label",
+			targetNamespace: "my-customer-ns",
+			username:        "test@user",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth", "dedicated-admins"},
+			operation:       v1beta1.Create,
+			labels: map[string]string{
+				"my-label": "hello",
+				"managed.openshift.io/storage-pv-quota-exempt": "true",
+				"managed.openshift.io/storage-lb-quota-exempt": "true",
+			},
+			shouldBeAllowed: false,
+		},
+		{
+			testID:          "dedicated-admin-cant-create-normal-ns-with-priv-label",
+			targetNamespace: "my-customer-ns",
+			username:        "test@user",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth", "dedicated-admins"},
+			operation:       v1beta1.Create,
+			labels: map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "true",
+				"managed.openshift.io/storage-lb-quota-exempt": "true",
+			},
+			shouldBeAllowed: false,
+		},
+	}
+	runNamespaceTests(t, tests)
+}
+
+func TestLabellingUpdates(t *testing.T) {
+	tests := []namespaceTestSuites{
+		{
+			// if for some reason the quota was explicitly set to false we shouldn't allow that to be removed
+			testID:          "dedicated-admins-cant-remove-quota-label",
+			targetNamespace: "my-customer-ns",
+			username:        "test@user",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth", "dedicated-admins"},
+			operation:       v1beta1.Update,
+			oldObject: createOldObject("my-customer-ns", "dedicated-admins-cant-remove-quota-label", map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "false",
+			}),
+			labels:          map[string]string{},
+			shouldBeAllowed: false,
+		},
+		{
+			// if for some reason the quota was explicitly set to false we shouldn't allow that to be removed (part 2)
+			testID:          "dedicated-admins-cant-remove-quota-label2",
+			targetNamespace: "my-customer-ns",
+			username:        "test@user",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth", "dedicated-admins"},
+			operation:       v1beta1.Update,
+			oldObject: createOldObject("my-customer-ns", "dedicated-admins-cant-remove-quota-label2", map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "false",
+			}),
+			labels:          map[string]string{"my-label": "hello"},
+			shouldBeAllowed: false,
+		},
+		{
+			// can a dedicated-admin swap explicit falses?
+			testID:          "dedicated-admins-cant-swap-quota-label",
+			targetNamespace: "my-customer-ns",
+			username:        "test@user",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth", "dedicated-admins"},
+			operation:       v1beta1.Update,
+			oldObject: createOldObject("my-customer-ns", "dedicated-admins-cant-swap-quota-label", map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "false",
+			}),
+			labels:          map[string]string{"managed.openshift.io/storage-lb-quota-exempt": "false"},
+			shouldBeAllowed: false,
+		},
+		{
+			// Nothing is changing here
+			testID:          "dedicated-admins-identity-operation",
+			targetNamespace: "my-customer-ns",
+			username:        "test@user",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth", "dedicated-admins"},
+			operation:       v1beta1.Update,
+			oldObject: createOldObject("my-customer-ns", "dedicated-admins-cant-trueify-exemption", map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "true",
+			}),
+			labels: map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "true",
+			},
+			shouldBeAllowed: true,
+		},
+		{
+			testID:          "dedicated-admins-cant-trueify-exemption",
+			targetNamespace: "my-customer-ns",
+			username:        "test@user",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth", "dedicated-admins"},
+			operation:       v1beta1.Update,
+			oldObject: createOldObject("my-customer-ns", "dedicated-admins-cant-trueify-exemption", map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "false",
+			}),
+			labels: map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "true",
+			},
+			shouldBeAllowed: false,
+		},
+		{
+			testID:          "sres-can-exempt-customer-ns",
+			targetNamespace: "my-customer-ns",
+			username:        "no-reply@redhat.com",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth", "osd-sre-admins"},
+			operation:       v1beta1.Update,
+			oldObject:       createOldObject("my-customer-ns", "dedicated-admin-cant-exempt-cust-ns-quota", map[string]string{}),
+			labels: map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "true",
+			},
+			shouldBeAllowed: true,
+		},
+		{
+			testID:          "dedicated-admin-cant-exempt-cust-ns-quota",
+			targetNamespace: "my-customer-ns",
+			username:        "test@user",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth", "dedicated-admins"},
+			operation:       v1beta1.Update,
+			oldObject:       createOldObject("my-customer-ns", "dedicated-admin-cant-exempt-cust-ns-quota", map[string]string{}),
+			labels: map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "true",
+			},
+			shouldBeAllowed: false,
+		},
+		{
+			testID:          "dedicated-admin-cant-alter-priv-ns",
+			targetNamespace: "openshift-test-ns",
+			username:        "test@user",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth", "dedicated-admins"},
+			operation:       v1beta1.Update,
+			oldObject: createOldObject("openshift-test-ns", "dedicated-admin-cant-alter-priv-ns", map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "true",
+				"managed.openshift.io/storage-lb-quota-exempt": "true",
+			}),
+			labels: map[string]string{
+				"managed.openshift.io/storage-pv-quota-exempt": "true",
+			},
+			shouldBeAllowed: false,
+		},
+		{
+			testID:          "dedicated-admin-cant-alter-priv-ns2",
+			targetNamespace: "openshift-test-ns2",
+			username:        "test@user",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth", "dedicated-admins"},
+			operation:       v1beta1.Update,
+			oldObject:       createOldObject("openshift-test-ns", "dedicated-admin-cant-alter-priv-ns2", map[string]string{}),
+			labels:          map[string]string{"my-label": "hello"},
+			shouldBeAllowed: false,
+		},
+		{
+			testID:          "dedicated-admin-can-label-cust-ns",
+			targetNamespace: "my-customer-ns",
+			username:        "test@user",
+			userGroups:      []string{"system:authenticated", "system:authenticated:oauth", "dedicated-admins"},
+			operation:       v1beta1.Update,
+			oldObject:       createOldObject("my-customer-ns", "dedicated-admin-can-label-cust-ns", map[string]string{}),
+			labels: map[string]string{
+				"my-cust-label": "true",
+			},
+			shouldBeAllowed: true,
+		},
+	}
+	runNamespaceTests(t, tests)
+
 }
 
 func TestBadRequests(t *testing.T) {

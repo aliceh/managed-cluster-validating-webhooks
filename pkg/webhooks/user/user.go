@@ -16,7 +16,6 @@ import (
 	"strings"
 	"sync"
 
-	responsehelper "github.com/openshift/managed-cluster-validating-webhooks/pkg/helpers"
 	"github.com/openshift/managed-cluster-validating-webhooks/pkg/userloader"
 
 	// Only need the DefaultIdentityProvider
@@ -25,6 +24,7 @@ import (
 	"k8s.io/api/admission/v1beta1"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	admissionctl "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -40,6 +40,7 @@ const (
 	// this IDP, and users who use this IDP must be a member of at least one
 	// redhatGroups.
 	redHatIDP string = identity.DefaultIdentityProvider
+	docString string = `Managed OpenShift customers and Red Hat associates have certain restrictions around logging in to the cluster. Red Hat SREs who manage managed clusters must use the %s identity provider, and not any other, so that their identity can be assured; Red Hat managed clusters SREs are members of at least one Red Hat managed group (%s). Other Red Hat associates who are not SREs may not use the %s identity provider to log into their clusters. Managed cluster customers may not use the %s identity provider, but may manage the users using other identity providers.`
 )
 
 var (
@@ -56,8 +57,9 @@ var (
 	// kubeAdminUsernames are core Kubernetes users, not generally created by people
 	// system:serviceaccount:openshift-authentication:oauth-openshift is omitted
 	// from this intentionally so that the service account must abide by the Red
-	// Hat associate check
-	kubeAdminUsernames = []string{"kube:admin", "system:admin"}
+	// Hat associate check.
+	// backplane-cluster-admin is a user we use in backplane to impersonate cluster-admin
+	kubeAdminUsernames = []string{"kube:admin", "system:admin", "backplane-cluster-admin"}
 
 	scope = admissionregv1.ClusterScope
 	rules = []admissionregv1.RuleWithOperations{
@@ -89,6 +91,13 @@ type userRequest struct {
 	Metadata   struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
+}
+
+// ObjectSelector implements Webhook interface
+func (s *UserWebhook) ObjectSelector() *metav1.LabelSelector { return nil }
+
+func (s *UserWebhook) Doc() string {
+	return fmt.Sprintf(docString, redHatIDP, redhatGroups, redHatIDP, redHatIDP)
 }
 
 // TimeoutSeconds implements Webhook interface
@@ -155,6 +164,11 @@ func (s *UserWebhook) isUsingRedHatIDP(userReq *userRequest) bool {
 		}
 	}
 	return false
+}
+
+// Authorized implements Webhook interface
+func (s *UserWebhook) Authorized(request admissionctl.Request) admissionctl.Response {
+	return s.authorized(request)
 }
 
 func (s *UserWebhook) authorized(request admissionctl.Request) admissionctl.Response {
@@ -238,27 +252,6 @@ func (s *UserWebhook) authorized(request admissionctl.Request) admissionctl.Resp
 	return ret
 }
 
-// HandleRequest hndles the incoming HTTP request
-func (s *UserWebhook) HandleRequest(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	request, _, err := utils.ParseHTTPRequest(r)
-	if err != nil {
-		log.Error(err, "Error parsing HTTP Request Body")
-		responsehelper.SendResponse(w, admissionctl.Errored(http.StatusBadRequest, err))
-		return
-	}
-	// Is this a valid request?
-	if !s.Validate(request) {
-		resp := admissionctl.Errored(http.StatusBadRequest, fmt.Errorf("Could not parse Namespace from request"))
-		resp.UID = request.AdmissionRequest.UID
-		responsehelper.SendResponse(w, resp)
-		return
-	}
-	// should the request be authorized?
-	responsehelper.SendResponse(w, s.authorized(request))
-}
-
 func (s *UserWebhook) loadUsers() error {
 	// load users, but do it a bit indirectly because it may (does) require itself
 	// to be inside a Kubernetes cluster. When testing, we won't have that, and so
@@ -287,6 +280,11 @@ func (s *UserWebhook) loadUsers() error {
 	}
 	s.Users = allUsers
 	return nil
+}
+
+// SyncSetLabelSelector returns the label selector to use in the SyncSet.
+func (s *UserWebhook) SyncSetLabelSelector() metav1.LabelSelector {
+	return utils.DefaultLabelSelector()
 }
 
 // NewWebhook creates a new webhook

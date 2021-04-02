@@ -6,11 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"os"
 
 	logf "sigs.k8s.io/controller-runtime/pkg/runtime/log"
 
+	"github.com/openshift/managed-cluster-validating-webhooks/pkg/dispatcher"
 	"github.com/openshift/managed-cluster-validating-webhooks/pkg/webhooks"
 )
 
@@ -31,8 +33,9 @@ func main() {
 	flag.Parse()
 	logf.SetLogger(logf.ZapLogger(true))
 	if !*testHooks {
-		log.Info("HTTP server running at", "listen", fmt.Sprintf("%s:%s", *listenAddress, *listenPort))
+		log.Info("HTTP server running at", "listen", net.JoinHostPort(*listenAddress, *listenPort))
 	}
+	dispatcher := dispatcher.NewDispatcher(webhooks.Webhooks)
 	seen := make(map[string]bool)
 	for name, hook := range webhooks.Webhooks {
 		realHook := hook()
@@ -43,14 +46,14 @@ func main() {
 		if !*testHooks {
 			log.Info("Listening", "webhookName", name, "URI", realHook.GetURI())
 		}
-		http.HandleFunc(realHook.GetURI(), realHook.HandleRequest)
+		http.HandleFunc(realHook.GetURI(), dispatcher.HandleRequest)
 	}
 	if *testHooks {
 		os.Exit(0)
 	}
 
 	server := &http.Server{
-		Addr: fmt.Sprintf("%s:%s", *listenAddress, *listenPort),
+		Addr: net.JoinHostPort(*listenAddress, *listenPort),
 	}
 	if *useTLS {
 		cafile, err := ioutil.ReadFile(*caCert)

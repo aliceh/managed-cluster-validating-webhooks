@@ -2,15 +2,14 @@ package regularuser
 
 import (
 	"fmt"
-	"net/http"
 	"strings"
 	"sync"
 
-	responsehelper "github.com/openshift/managed-cluster-validating-webhooks/pkg/helpers"
 	"github.com/openshift/managed-cluster-validating-webhooks/pkg/webhooks/utils"
 	"k8s.io/api/admission/v1beta1"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	admissionctl "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -18,11 +17,18 @@ import (
 )
 
 const (
-	WebhookName string = "regular-user-validation"
+	WebhookName       string = "regular-user-validation"
+	docString         string = `Managed OpenShift customers may not manage any objects in the following APIgroups %s, nor may Managed OpenShift customers alter the ClusterVersion, Node or SubjectPermission objects.`
+	mustGatherKind    string = "MustGather"
+	mustGatherGroup   string = "managed.openshift.io"
+	customDomainKind  string = "CustomDomain"
+	customDomainGroup string = "managed.openshift.io"
 )
 
 var (
-	adminGroups = []string{"osd-sre-admins", "osd-sre-cluster-admins"}
+	adminGroups        = []string{"osd-sre-admins", "osd-sre-cluster-admins"}
+	adminUsers         = []string{"backplane-cluster-admin"}
+	ceeGroup    string = "osd-devaccess"
 
 	scope = admissionregv1.AllScopes
 	rules = []admissionregv1.RuleWithOperations{
@@ -51,7 +57,7 @@ var (
 			Rule: admissionregv1.Rule{
 				APIGroups:   []string{"config.openshift.io"},
 				APIVersions: []string{"*"},
-				Resources:   []string{"clusterversions", "clusterversions/status"},
+				Resources:   []string{"clusterversions", "clusterversions/status", "schedulers"},
 				Scope:       &scope,
 			},
 		},
@@ -77,11 +83,33 @@ var (
 	log = logf.Log.WithName(WebhookName)
 )
 
-// NamespaceWebhook validates a Namespace change
+// RegularuserWebhook protects various objects from unauthorized manipulation
 type RegularuserWebhook struct {
 	mu sync.Mutex
 	s  runtime.Scheme
 }
+
+func (s *RegularuserWebhook) Doc() string {
+	hist := make(map[string]bool)
+	for _, rule := range rules {
+		for _, group := range rule.APIGroups {
+			if group != "" {
+				// If there's an empty API group let's not include it because it would be confusing.
+				hist[group] = true
+			}
+		}
+	}
+	//dedup
+	allGroups := make([]string, 0)
+	for k := range hist {
+		allGroups = append(allGroups, k)
+	}
+
+	return fmt.Sprintf(docString, allGroups)
+}
+
+// ObjectSelector implements Webhook interface
+func (s *RegularuserWebhook) ObjectSelector() *metav1.LabelSelector { return nil }
 
 // TimeoutSeconds implements Webhook interface
 func (s *RegularuserWebhook) TimeoutSeconds() int32 { return 2 }
@@ -118,6 +146,11 @@ func (s *RegularuserWebhook) Validate(req admissionctl.Request) bool {
 	return valid
 }
 
+// Authorized implements Webhook interface
+func (s *RegularuserWebhook) Authorized(request admissionctl.Request) admissionctl.Response {
+	return s.authorized(request)
+}
+
 func (s *RegularuserWebhook) authorized(request admissionctl.Request) admissionctl.Response {
 	var ret admissionctl.Response
 
@@ -139,6 +172,21 @@ func (s *RegularuserWebhook) authorized(request admissionctl.Request) admissionc
 		ret.UID = request.AdmissionRequest.UID
 		return ret
 	}
+	if isCustomDomainAuthorized(request) {
+		ret = admissionctl.Allowed("Management of CustomDomain CR is authorized")
+		ret.UID = request.AdmissionRequest.UID
+		return ret
+	}
+	if isMustGatherAuthorized(request) {
+		ret = admissionctl.Allowed("Management of MustGather CR is authorized")
+		ret.UID = request.AdmissionRequest.UID
+		return ret
+	}
+	if utils.SliceContains(request.AdmissionRequest.UserInfo.Username, adminUsers) {
+		ret = admissionctl.Allowed("Specified admin users are allowed")
+		ret.UID = request.AdmissionRequest.UID
+		return ret
+	}
 	for _, userGroup := range request.UserInfo.Groups {
 		if utils.SliceContains(userGroup, adminGroups) {
 			ret = admissionctl.Allowed("Members of admin groups are allowed")
@@ -148,34 +196,29 @@ func (s *RegularuserWebhook) authorized(request admissionctl.Request) admissionc
 	}
 
 	log.Info("Denying access", "request", request.AdmissionRequest)
-	ret = admissionctl.Denied("Denied")
+	ret = admissionctl.Denied("Prevented from accessing Red Hat managed resources. This is in an effort to prevent harmful actions that may cause unintended consequences or affect the stability of the cluster. If you have any questions about this, please reach out to Red Hat support at https://access.redhat.com/support")
 	ret.UID = request.AdmissionRequest.UID
 	return ret
 }
 
-// HandleRequest hndles the incoming HTTP request
-func (s *RegularuserWebhook) HandleRequest(w http.ResponseWriter, r *http.Request) {
+// isMustGatherAuthorized check if request is authorized for MustGather CR
+func isMustGatherAuthorized(request admissionctl.Request) bool {
+	return (utils.SliceContains(ceeGroup, request.UserInfo.Groups) &&
+		request.Kind.Kind == mustGatherKind &&
+		request.Kind.Group == mustGatherGroup)
+}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	request, _, err := utils.ParseHTTPRequest(r)
-	if err != nil {
-		log.Error(err, "Error parsing HTTP Request Body")
-		responsehelper.SendResponse(w, admissionctl.Errored(http.StatusBadRequest, err))
-		return
-	}
-	// Is this a valid request?
-	if !s.Validate(request) {
-		resp := admissionctl.Errored(http.StatusBadRequest, fmt.Errorf("Could not parse Namespace from request"))
-		resp.UID = request.AdmissionRequest.UID
-		responsehelper.SendResponse(w, resp)
+// isCustomDomainAuthorized check if request is authorized for CustomDomain CR
+func isCustomDomainAuthorized(request admissionctl.Request) bool {
+	return ((utils.SliceContains("cluster-admins", request.UserInfo.Groups) ||
+		utils.SliceContains("dedicated-admins", request.UserInfo.Groups)) &&
+		request.Kind.Kind == customDomainKind &&
+		request.Kind.Group == customDomainGroup)
+}
 
-		return
-	}
-	// should the request be authorized?
-
-	responsehelper.SendResponse(w, s.authorized(request))
-
+// SyncSetLabelSelector returns the label selector to use in the SyncSet.
+func (s *RegularuserWebhook) SyncSetLabelSelector() metav1.LabelSelector {
+	return utils.DefaultLabelSelector()
 }
 
 // NewWebhook creates a new webhook

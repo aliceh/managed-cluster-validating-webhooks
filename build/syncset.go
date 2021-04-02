@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -10,8 +9,9 @@ import (
 	"strings"
 
 	templatev1 "github.com/openshift/api/template/v1"
-	hivev1 "github.com/openshift/hive/pkg/apis/hive/v1"
-	"github.com/openshift/managed-cluster-validating-webhooks/pkg/webhooks"
+	"github.com/openshift/managed-cluster-validating-webhooks/pkg/syncset"
+	webhooks "github.com/openshift/managed-cluster-validating-webhooks/pkg/webhooks"
+	utils "github.com/openshift/managed-cluster-validating-webhooks/pkg/webhooks/utils"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -48,10 +48,6 @@ var (
 	}
 )
 
-func readHooks() map[string]webhooks.WebhookFactory {
-	return webhooks.Webhooks
-}
-
 func createServiceAccount() *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
 		TypeMeta: metav1.TypeMeta{
@@ -75,18 +71,6 @@ func createClusterRole() *rbacv1.ClusterRole {
 			Name: "webhook-validation-cr",
 		},
 		Rules: []rbacv1.PolicyRule{
-			// (injector): Inject CA bundle
-			{
-				APIGroups: []string{"admissionregistration.k8s.io"},
-				Resources: []string{"validatingwebhookconfigurations"},
-				Verbs:     []string{"list", "patch", "get", "update"},
-			},
-			// (injector): Read CA bundle
-			{
-				APIGroups: []string{""},
-				Resources: []string{"configmaps"},
-				Verbs:     []string{"list", "get"},
-			},
 			// (user-validation): List Groups and read their member names
 			{
 				APIGroups: []string{"user.openshift.io"},
@@ -141,6 +125,10 @@ func createCACertConfigMap() *corev1.ConfigMap {
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
+				// service.beta.openshift.io/inject-cabundle annotation informs
+				// service-ca-operator to insert a CA cert bundle in this ConfigMap,
+				// later mounted by the Pod for secure communications from Kubernetes
+				// API server.
 				"service.beta.openshift.io/inject-cabundle": "true",
 			},
 			Name:      "webhook-cert",
@@ -237,18 +225,6 @@ func createDaemonSet() *appsv1.DaemonSet {
 							},
 						},
 					},
-					// TODO(lseelye): Needed until Until 4.4 when openshift-ca-operator
-					// supports ValidatingWebhookConfigurations
-					InitContainers: []corev1.Container{
-						{
-							ImagePullPolicy: corev1.PullAlways,
-							Image:           *image,
-							Name:            "inject-cert",
-							Command: []string{
-								"injector",
-							},
-						},
-					},
 					Containers: []corev1.Container{
 						{
 							ImagePullPolicy: corev1.PullAlways,
@@ -294,6 +270,9 @@ func createService() *corev1.Service {
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{
+				// service-ca-operator annotation to correlate the Secret (containing
+				// private cert infomation) back to the Service for which it was
+				// created.
 				"service.beta.openshift.io/serving-cert-secret-name": *secretName,
 			},
 			Labels: map[string]string{
@@ -339,12 +318,11 @@ func createValidatingWebhookConfiguration(hook webhooks.Webhook) admissionregv1.
 			Name: fmt.Sprintf("sre-%s", hook.Name()),
 
 			Annotations: map[string]string{
-				"managed.openshift.io/inject-cabundle-from": fmt.Sprintf("%s/webhook-cert", *namespace),
-				// TODO(lseelye): Leave out until Until 4.4 when openshift-ca-operator
-				// supports ValidatingWebhookConfigurations, so as to not fight against
-				// that operator once 4.4 lands.
-				//	// For openshift/service-ca-operator
-				//	"service.beta.openshift.io/inject-cabundle": "true",
+				// service.beta.openshift.io/inject-cabundle annotation will instruct
+				// service-ca-operator to install a CA cert in the
+				// ValidatingWebhookConfiguration object, which is required for
+				// Kubernetes to communicate securely to the Service.
+				"service.beta.openshift.io/inject-cabundle": "true",
 			},
 		},
 		Webhooks: []admissionregv1.ValidatingWebhook{
@@ -354,6 +332,7 @@ func createValidatingWebhookConfiguration(hook webhooks.Webhook) admissionregv1.
 				SideEffects:             &sideEffects,
 				MatchPolicy:             &matchPolicy,
 				Name:                    fmt.Sprintf("%s.managed.openshift.io", hook.Name()),
+				ObjectSelector:          hook.ObjectSelector(),
 				FailurePolicy:           &failPolicy,
 				ClientConfig: admissionregv1.WebhookClientConfig{
 					Service: &admissionregv1.ServiceReference{
@@ -368,15 +347,6 @@ func createValidatingWebhookConfiguration(hook webhooks.Webhook) admissionregv1.
 	}
 }
 
-func encode(obj interface{}) []byte {
-	o, err := json.Marshal(obj)
-	if err != nil {
-		fmt.Printf("Error encoding %+v\n", obj)
-		os.Exit(1)
-	}
-	return o
-}
-
 func sliceContains(needle string, haystack []string) bool {
 	for _, hay := range haystack {
 		if hay == needle {
@@ -386,46 +356,20 @@ func sliceContains(needle string, haystack []string) bool {
 	return false
 }
 
-func createSelectorSyncSet(resources []runtime.RawExtension) *hivev1.SelectorSyncSet {
-	return &hivev1.SelectorSyncSet{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "SelectorSyncSet",
-			APIVersion: "hive.openshift.io/v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "managed-cluster-validating-webhooks",
-			Labels: map[string]string{
-				"managed.openshift.io/gitHash":     "${IMAGE_TAG}",
-				"managed.openshift.io/gitRepoName": "${REPO_NAME}",
-				"managed.openshift.io/osd":         "true",
-			},
-		},
-		Spec: hivev1.SelectorSyncSetSpec{
-			SyncSetCommonSpec: hivev1.SyncSetCommonSpec{
-				ResourceApplyMode: hivev1.SyncResourceApplyMode,
-				Resources:         resources,
-			},
-			ClusterDeploymentSelector: metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"api.openshift.com/managed": "true",
-				},
-			},
-		},
-	}
-}
 func main() {
 	flag.Parse()
 
 	skip := strings.Split(*excludes, ",")
 	onlyInclude := strings.Split(*only, "")
 
-	encoded := make([]runtime.RawExtension, 0)
-	encoded = append(encoded, runtime.RawExtension{Object: createNamespace()})
-	encoded = append(encoded, runtime.RawExtension{Object: createServiceAccount()})
-	encoded = append(encoded, runtime.RawExtension{Object: createClusterRole()})
-	encoded = append(encoded, runtime.RawExtension{Object: createClusterRoleBinding()})
-	encoded = append(encoded, runtime.RawExtension{Object: createCACertConfigMap()})
-	encoded = append(encoded, runtime.RawExtension{Object: createService()})
+	templateResources := syncset.SyncSetResourcesByLabelSelector{}
+	templateResources.Add(utils.DefaultLabelSelector(), runtime.RawExtension{Object: createNamespace()})
+	templateResources.Add(utils.DefaultLabelSelector(), runtime.RawExtension{Object: createServiceAccount()})
+	templateResources.Add(utils.DefaultLabelSelector(), runtime.RawExtension{Object: createClusterRole()})
+	templateResources.Add(utils.DefaultLabelSelector(), runtime.RawExtension{Object: createClusterRoleBinding()})
+	templateResources.Add(utils.DefaultLabelSelector(), runtime.RawExtension{Object: createCACertConfigMap()})
+	templateResources.Add(utils.DefaultLabelSelector(), runtime.RawExtension{Object: createService()})
+	templateResources.Add(utils.DefaultLabelSelector(), runtime.RawExtension{Object: createDaemonSet()})
 
 	// Collect all of our webhook names and prepare to sort them all so the
 	// resulting SelectorSyncSet is always sorted.
@@ -453,20 +397,12 @@ func main() {
 		if sliceContains(hook().Name(), skip) {
 			continue
 		}
-		if len(onlyInclude) > 0 {
-			if sliceContains(hook().Name(), onlyInclude) {
-				encoded = append(encoded, runtime.RawExtension{Raw: encode(createValidatingWebhookConfiguration(hook()))})
-			}
+		if len(onlyInclude) > 0 && !sliceContains(hook().Name(), onlyInclude) {
 			continue
 		}
-		// can't use RawExtension{Object: } here because the VWC doesn't implement DeepCopyObject
-		encoded = append(encoded, runtime.RawExtension{Raw: encode(createValidatingWebhookConfiguration(hook()))})
+		templateResources.Add(hook().SyncSetLabelSelector(), runtime.RawExtension{Raw: syncset.Encode(createValidatingWebhookConfiguration(hook()))})
 	}
-	// TODO(lseelye): Until 4.3, place the DaemonSet after the
-	// ValidatingWebhookConfigurations are added to the `encoded` list so that the
-	// initContainer will work (see createDaemonSet and
-	// createValidatingWebhookConfiguration)
-	encoded = append(encoded, runtime.RawExtension{Object: createDaemonSet()})
+
 	if *showHookNames {
 		os.Exit(0)
 	}
@@ -476,7 +412,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	sss := createSelectorSyncSet(encoded)
+	selectorSyncSets := templateResources.RenderSelectorSyncSets(sssLabels)
 
 	te := templatev1.Template{
 		TypeMeta: metav1.TypeMeta{
@@ -497,11 +433,7 @@ func main() {
 				Value:    "managed-cluster-validating-webhooks",
 			},
 		},
-		Objects: []runtime.RawExtension{
-			{
-				Raw: encode(sss),
-			},
-		},
+		Objects: selectorSyncSets,
 	}
 
 	y, err := yaml.Marshal(te)

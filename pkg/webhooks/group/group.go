@@ -2,15 +2,16 @@ package group
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
 	"sync"
 	"time"
 
-	responsehelper "github.com/openshift/managed-cluster-validating-webhooks/pkg/helpers"
 	"github.com/openshift/managed-cluster-validating-webhooks/pkg/webhooks/utils"
 	"k8s.io/api/admission/v1beta1"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/runtime/log"
 	admissionctl "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -35,15 +36,19 @@ type groupRequest struct {
 }
 
 const (
-	WebhookName     string = "group-validation"
-	protectedGroups string = `(^osd.*|^dedicated-admins$|^cluster-admins$|^layered-cs-sre-admins$)`
+	WebhookName               string = "group-validation"
+	protectedAdminGroups      string = `(^dedicated-admins$|^cluster-admins$)`
+	protectedManagementGroups string = `(^osd-sre-admins$|^osd-sre-cluster-admins$|^osd-devaccess$|^layered-cs-sre-admins$)`
+	ocmUrl                    string = "https://cloud.redhat.com/openshift"
+	docString                 string = `Managed OpenShift customers may not manage the Red Hat managed groups identified by the regular expression %s. Instead, customers should use %s to manage the customer-facing groups identified by this regular expression %s.`
 )
 
 var (
-	log               = logf.Log.WithName(WebhookName)
-	protectedGroupsRe = regexp.MustCompile(protectedGroups)
-	clusterAdminUsers = []string{"kube:admin", "system:admin"}
-	adminGroups       = []string{"osd-sre-admins", "osd-sre-cluster-admins"}
+	log                         = logf.Log.WithName(WebhookName)
+	protectedAdminGroupsRe      = regexp.MustCompile(protectedAdminGroups)
+	protectedManagementGroupsRe = regexp.MustCompile(protectedManagementGroups)
+	clusterAdminUsers           = []string{"kube:admin", "system:admin", "backplane-cluster-admin"}
+	adminGroups                 = []string{"osd-sre-admins", "osd-sre-cluster-admins"}
 
 	scope = admissionregv1.ClusterScope
 	rules = []admissionregv1.RuleWithOperations{
@@ -58,6 +63,13 @@ var (
 		},
 	}
 )
+
+// ObjectSelector implements Webhook interface
+func (s *GroupWebhook) ObjectSelector() *metav1.LabelSelector { return nil }
+
+func (s *GroupWebhook) Doc() string {
+	return fmt.Sprintf(docString, protectedManagementGroups, ocmUrl, protectedAdminGroups)
+}
 
 // TimeoutSeconds implements Webhook interface
 func (s *GroupWebhook) TimeoutSeconds() int32 { return 2 }
@@ -82,6 +94,11 @@ func (s *GroupWebhook) SideEffects() admissionregv1.SideEffectClass {
 	return admissionregv1.SideEffectClassNone
 }
 
+// Authorized implements Webhook interface
+func (s *GroupWebhook) Authorized(request admissionctl.Request) admissionctl.Response {
+	return s.authorized(request)
+}
+
 // Is the request authorized?
 func (s *GroupWebhook) authorized(request admissionctl.Request) admissionctl.Response {
 	var ret admissionctl.Response
@@ -103,8 +120,9 @@ func (s *GroupWebhook) authorized(request admissionctl.Request) admissionctl.Res
 		ret.UID = request.AdmissionRequest.UID
 		return ret
 	}
-	if protectedGroupsRe.Match([]byte(group.Metadata.Name)) {
-		// protected group trying to be accessed, so let's check
+
+	if protectedAdminGroupsRe.Match([]byte(group.Metadata.Name)) {
+		// protected Admin group trying to be accessed, so let's check
 		for _, usersgroup := range request.AdmissionRequest.UserInfo.Groups {
 			// are they an admin?
 			if utils.SliceContains(usersgroup, adminGroups) {
@@ -113,11 +131,28 @@ func (s *GroupWebhook) authorized(request admissionctl.Request) admissionctl.Res
 				return ret
 			}
 		}
+
 		log.Info("Denying access", "request", request.AdmissionRequest)
-		ret = admissionctl.Denied("May not access protected group")
+		ret = admissionctl.Denied(fmt.Sprintf("Prevented from accessing Red Hat managed Admin groups. Customers should use https://cloud.redhat.com/openshift to manage groups that match this regular expression: %s", protectedAdminGroups))
 		ret.UID = request.AdmissionRequest.UID
 		return ret
 	}
+
+	if protectedManagementGroupsRe.Match([]byte(group.Metadata.Name)) {
+		for _, usergroup := range request.AdmissionRequest.UserInfo.Groups {
+			if utils.SliceContains(usergroup, adminGroups) {
+				ret = admissionctl.Allowed("Admin may access protected group")
+				ret.UID = request.AdmissionRequest.UID
+				return ret
+			}
+		}
+
+		log.Info("Denying access", "request", request.AdmissionRequest)
+		ret = admissionctl.Denied(fmt.Sprintf("Prevented from accessing Red Hat Management groups. Customer user groups may NOT match this regular expression: %s", protectedManagementGroups))
+		ret.UID = request.AdmissionRequest.UID
+		return ret
+	}
+
 	// it isn't protected, so let's not be bothered
 	ret = admissionctl.Allowed("RBAC allowed")
 	ret.UID = request.AdmissionRequest.UID
@@ -133,24 +168,9 @@ func (s *GroupWebhook) Validate(req admissionctl.Request) bool {
 	return valid
 }
 
-// HandleRequest Decide if the incoming request is allowed
-// Based on https://github.com/openshift/managed-cluster-validating-webhooks/blob/33aae59f588643fb8d1fe19cea9572c759586dd6/src/webhook/group_validation.py
-func (s *GroupWebhook) HandleRequest(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	request, _, err := utils.ParseHTTPRequest(r)
-	if err != nil {
-		log.Error(err, "Error parsing HTTP Request Body")
-		responsehelper.SendResponse(w, admissionctl.Errored(http.StatusBadRequest, err))
-		return
-	}
-	// Is this a valid request?
-	if !s.Validate(request) {
-		responsehelper.SendResponse(w, admissionctl.Errored(http.StatusBadRequest, err))
-		return
-	}
-	// should the request be authorized?
-	responsehelper.SendResponse(w, s.authorized(request))
+// SyncSetLabelSelector returns the label selector to use in the SyncSet.
+func (s *GroupWebhook) SyncSetLabelSelector() metav1.LabelSelector {
+	return utils.DefaultLabelSelector()
 }
 
 // NewWebhook creates a new webhook

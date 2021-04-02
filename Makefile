@@ -5,13 +5,14 @@ GIT_HASH := $(shell git rev-parse --short=7 HEAD)
 IMAGETAG ?= ${GIT_HASH}
 
 BASE_IMG ?= managed-cluster-validating-webhooks
-IMG ?= quay.io/app-sre/${BASE_IMG}
+IMG_REGISTRY ?= quay.io
+IMG_ORG ?= app-sre
+IMG ?= $(IMG_REGISTRY)/$(IMG_ORG)/${BASE_IMG}
 
 # nb: registry.svc.ci.openshift.org/openshift/release:golang-1.14 doesn't work for this
-SYNCSET_GENERATOR_IMAGE := golang:1.14
+SYNCSET_GENERATOR_IMAGE := quay.io/app-sre/golang:1.14
 
 BINARY_FILE ?= build/_output/webhooks
-INJECTOR_BIN ?= build/_output/injector
 
 GO_SOURCES := $(find $(CURDIR) -type f -name "*.go" -print)
 EXTRA_DEPS := $(find $(CURDIR)/build -type f -print) Makefile
@@ -24,9 +25,13 @@ GOBUILDFLAGS = -gcflags="all=-trimpath=$(GOPATH)" -asmflags="all=-trimpath=$(GOP
 SELECTOR_SYNC_SET_HOOK_EXCLUDES ?= debug-hook
 SELECTOR_SYNC_SET_DESTINATION = build/selectorsyncset.yaml
 
-CONTAINER_ENGINE ?= docker
+CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
 #eg, -v
 TESTOPTS ?=
+
+DOC_BINARY := hack/documentation/document.go
+# ex -hideRules
+DOCFLAGS ?= 
 
 default: all
 
@@ -39,7 +44,7 @@ test: vet $(GO_SOURCES)
 
 .PHONY: clean
 clean:
-	@rm -f $(BINARY_FILE) $(INJECTOR_BIN) coverage.txt
+	@rm -f $(BINARY_FILE) coverage.txt
 
 .PHONY: serve
 serve:
@@ -51,15 +56,11 @@ vet:
 	@go vet ./cmd/... ./pkg/...
 
 .PHONY: build
-build: $(BINARY_FILE) $(INJECTOR_BIN)
+build: $(BINARY_FILE)
 
 $(BINARY_FILE): test $(GO_SOURCES)
 	mkdir -p $(shell dirname $(BINARY_FILE))
 	$(GOENV) go build $(GOBUILDFLAGS) -o $(BINARY_FILE) ./cmd
-
-$(INJECTOR_BIN): test $(GO_SOURCES)
-	mkdir -p $(shell dirname $(INJECTOR_BIN))
-	$(GOENV) go build $(GOBUILDFLAGS) -o $(INJECTOR_BIN) ./cmd/injector
 
 .PHONY: build-base
 build-base: build-image
@@ -76,7 +77,7 @@ syncset: $(SELECTOR_SYNC_SET_DESTINATION)
 # required for the Template parsing
 $(SELECTOR_SYNC_SET_DESTINATION):
 	$(CONTAINER_ENGINE) run \
-		-v $(CURDIR):$(CURDIR) \
+		-v $(CURDIR):$(CURDIR):z \
 		-w $(CURDIR) \
 		--rm \
 		$(SYNCSET_GENERATOR_IMAGE) \
@@ -106,7 +107,16 @@ skopeo-push:
 .PHONY: push-base
 push-base: build/Dockerfile
 	$(CONTAINER_ENGINE) push $(IMG):$(IMAGETAG)
+	$(CONTAINER_ENGINE) push $(IMG):latest
 
 coverage: coverage.txt
 coverage.txt: vet $(GO_SOURCES)
 	@./hack/test.sh
+
+.PHONY: docs
+docs:
+	@# Ensure that the output from the test is hidden so this can be
+	@# make docs > docs.json
+	@# To hide the rules: make DOCFLAGS=-hideRules docs
+	@$(MAKE test)
+	@go run $(DOC_BINARY) $(DOCFLAGS)

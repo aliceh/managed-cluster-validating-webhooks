@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"sync"
 
-	responsehelper "github.com/openshift/managed-cluster-validating-webhooks/pkg/helpers"
 	"github.com/openshift/managed-cluster-validating-webhooks/pkg/webhooks/utils"
 	"k8s.io/api/admission/v1beta1"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	admissionctl "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -19,10 +19,11 @@ import (
 const (
 	WebhookName             string = "identity-validation"
 	DefaultIdentityProvider string = "OpenShift_SRE"
+	docString               string = `Managed OpenShift customers may not modify Red Hat's managed Identities (prefixed and identified with %s).`
 )
 
 var (
-	privilegedUsers = []string{"kube:admin", "system:admin", "system:serviceaccount:openshift-authentication:oauth-openshift"}
+	privilegedUsers = []string{"kube:admin", "system:admin", "system:serviceaccount:openshift-authentication:oauth-openshift", "backplane-cluster-admin"}
 	adminGroups     = []string{"osd-sre-admins", "osd-sre-cluster-admins"}
 
 	log = logf.Log.WithName(WebhookName)
@@ -48,10 +49,17 @@ type identityRequest struct {
 	ProviderName string `json:"providerName"`
 }
 
-// IdentityWebhook validates a Namespace change
+// IdentityWebhook validates an Identity change
 type IdentityWebhook struct {
 	mu sync.Mutex
 	s  runtime.Scheme
+}
+
+// ObjectSelector implements Webhook interface
+func (s *IdentityWebhook) ObjectSelector() *metav1.LabelSelector { return nil }
+
+func (s *IdentityWebhook) Doc() string {
+	return fmt.Sprintf(docString, DefaultIdentityProvider)
 }
 
 // TimeoutSeconds implements Webhook interface
@@ -121,7 +129,7 @@ func (s *IdentityWebhook) authorized(request admissionctl.Request) admissionctl.
 			}
 		}
 		log.Info("Denying access", "request", request.AdmissionRequest)
-		ret = admissionctl.Denied("Permission denied")
+		ret = admissionctl.Denied(fmt.Sprintf("Prevented from modifying Red Hat's managed Identity. You may create/modify any Identity objects, except for %s.", DefaultIdentityProvider))
 		ret.UID = request.AdmissionRequest.UID
 		return ret
 	}
@@ -132,26 +140,14 @@ func (s *IdentityWebhook) authorized(request admissionctl.Request) admissionctl.
 
 }
 
-// HandleRequest Decide if the incoming request is allowed
-func (s *IdentityWebhook) HandleRequest(w http.ResponseWriter, r *http.Request) {
+// Authorized implements Webhook interface
+func (s *IdentityWebhook) Authorized(request admissionctl.Request) admissionctl.Response {
+	return s.authorized(request)
+}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	request, _, err := utils.ParseHTTPRequest(r)
-	if err != nil {
-		log.Error(err, "Error parsing HTTP Request Body")
-		responsehelper.SendResponse(w, admissionctl.Errored(http.StatusBadRequest, err))
-		return
-	}
-	// Is this a valid request?
-	if !s.Validate(request) {
-		responsehelper.SendResponse(w,
-			admissionctl.Errored(http.StatusBadRequest,
-				fmt.Errorf("Could not parse Namespace from request")))
-		return
-	}
-	// should the request be authorized?
-	responsehelper.SendResponse(w, s.authorized(request))
+// SyncSetLabelSelector returns the label selector to use in the SyncSet.
+func (s *IdentityWebhook) SyncSetLabelSelector() metav1.LabelSelector {
+	return utils.DefaultLabelSelector()
 }
 
 // NewWebhook creates a new webhook
